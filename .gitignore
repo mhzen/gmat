@@ -1,0 +1,13 @@
+**/.pio-core/
+**/.pio/
+**/__pycache__/
+*.py[cod]
+/.venv/
+/tmp/
+/data/
+/bench*.csv
+*.exe
+payload-tests
+gcs-tests
+bench-tests
+e32-tests
