@@ -4,15 +4,6 @@ ESP32 rocket payload and ground station for the GMAT 2026 final project.
 Reads MPU6050 acceleration/gyro and BMP280 pressure/temperature at 5 Hz,
 with CSV logging and a local dashboard.
 
-Payload operation is manual. `ARM` enables firing and `DISARM` returns the
-payload to `IDLE`. The firmware still reports a timer-based `DESCENT` state.
-The dashboard shows `FIRE ACCEPTED` for both post-command states. That status
-confirms command acceptance only.
-
-**WIP: GPIO25 is a live pyro output.** An accepted `FIRE` drives GPIO25 HIGH for
-`firePulseMs` (1 s), then LOW. Keep the igniter disconnected for hardware tests.
-Radio wiring, power and E32 settings are still unconfirmed.
-
 ## Architecture
 
 ```mermaid
@@ -31,7 +22,7 @@ flowchart LR
 | [firmware/gcs](firmware/gcs/README.md) | Radio-to-USB bridge. |
 | [ground/bridge](ground/bridge/README.md) | Serial telemetry logger. |
 | [ground/dashboard](ground/dashboard/README.md) | Plots, reported payload state, barometer values and raw terminal. |
-| [schematic/skematik.pdf](schematic/skematik.pdf) | Payload schematic. |
+| [flowchart/skematik.pdf](flowchart/system_explanation.pdf) | Payload schematic. |
 
 ## Run
 
