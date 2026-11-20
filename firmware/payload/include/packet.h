@@ -2,7 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum class State : uint8_t { IDLE = 0, ARMED, BOOST, COAST, EJECT, DESCENT, LANDED };
+enum class State : uint8_t { IDLE = 0, ARMED, EJECT, DESCENT };
 enum class Command : uint8_t { ARM = 1, DISARM, FIRE };
 
 #pragma pack(push, 1)

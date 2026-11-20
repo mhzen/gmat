@@ -1,34 +1,26 @@
 <!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GMAT · Ground control</title>
-<style>
-:root{color-scheme:dark;font:15px system-ui;color:#e6e9ed;background:#111417}*{box-sizing:border-box}body{max-width:1440px;margin:auto;padding:28px}header,.bar{display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}h1{font-size:20px;margin:0}h2{font-size:16px;font-weight:500}small,.muted{color:#aeb7c1}section{border-top:1px solid #343b43;margin-top:24px;padding-top:12px}.state{font-size:48px;font-weight:600;letter-spacing:-2px}#states{word-spacing:12px;color:#aeb7c1;line-height:2}.plots{display:grid;grid-template-columns:1fr 1fr;gap:28px}canvas{width:100%;height:230px;display:block}button{min-height:44px;padding:10px 20px;background:#242c33;border:1px solid #56616d;border-radius:4px;color:inherit;cursor:pointer}button:hover{background:#35414a}button:disabled{opacity:.4;cursor:default}button:focus-visible{outline:2px solid #76caff}#FIRE{border-color:#ef9787}pre{font:12px/1.7 Consolas,monospace;height:200px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#0b0e10;padding:16px}output{font-family:Consolas,monospace}.warning{color:#f1bd76}#status{min-height:24px}@media(max-width:700px){body{padding:16px}.plots{grid-template-columns:1fr}.state{font-size:38px}}
-@media(min-width:900px) and (min-height:650px){
-body{height:100dvh;padding:16px 24px;display:grid;grid-template-rows:auto auto auto minmax(0,1fr) auto auto auto minmax(0,.8fr);gap:6px}
-body>*,.plots>section{min-width:0;min-height:0}
-section{margin-top:0;padding-top:8px}
-h2{margin:0 0 6px}
-.state{font-size:36px;line-height:1.2;letter-spacing:-1px}
-#states{line-height:1.5}
-.plots{gap:24px}
-.plots>section{display:grid;grid-template-rows:auto auto minmax(0,1fr)}
-canvas{height:100%;min-height:0}
-body>section:last-of-type{display:flex;flex-direction:column;gap:6px}
-body>section:last-of-type .bar{flex-shrink:0}
-pre{height:auto;min-height:0;flex:1;margin:0;padding:10px 12px}
-#meta{display:block;max-width:50vw;overflow-wrap:anywhere}
-}
-</style>
-<header><h1>GMAT <small>/ Ground control</small></h1><span class="warning">Bench simulation · Ejection hardware disconnected</span></header>
-<section class="bar"><div><small>PAYLOAD STATE</small><div class="state" id="state">Awaiting telemetry</div><output id="barometer">Pressure ? hPa / Temperature ? ?C</output><div id="flags">Armed — · Fired —</div></div><div><div id="link">Connecting…</div><small id="meta"></small></div></section>
-<div id="states">IDLE ARMED BOOST COAST EJECT DESCENT LANDED</div>
-<div class="plots"><section><h2>Acceleration <small>mg</small></h2><output id="acc">X — / Y — / Z —</output><canvas id="a" aria-label="Acceleration XYZ history"></canvas></section><section><h2>Angular velocity <small>°/s</small></h2><output id="gyro">X — / Y — / Z —</output><canvas id="g" aria-label="Gyroscope XYZ history"></canvas></section></div>
-<small>60-second history · X blue / Y amber / Z green · Sensor coordinates</small>
-<section class="bar"><div><h2>Bench commands</h2><small>USB write does not confirm payload execution.</small></div><div><button id="ARM">ARM</button> <button id="DISARM">DISARM</button> <button id="FIRE">FIRE</button></div></section><div id="status" role="status"></div>
-<section><div class="bar"><h2>Raw serial terminal</h2><div><button id="pause">Pause scrolling</button> <button id="clear">Clear view</button></div></div><pre id="terminal" tabindex="0" aria-label="Raw serial data"></pre></section>
-<script>
-const $=id=>document.getElementById(id),names=['IDLE','ARMED','BOOST','COAST','EJECT','DESCENT','LANDED'];let snapshot,paused=false,cleared='',pending=false;
-function draw(id,start,scale){const c=$(id),r=c.getBoundingClientRect(),d=devicePixelRatio||1;c.width=r.width*d;c.height=r.height*d;const x=c.getContext('2d');x.scale(d,d);const w=r.width,h=r.height,now=Date.now()/1000,rows=(snapshot?.samples||[]).filter(s=>s[0]>=now-60);let max=1;rows.forEach(s=>{for(let k=0;k<3;k++)max=Math.max(max,Math.abs(s[1][start+k]*scale))});x.font='11px monospace';x.fillStyle='#aeb7c1';x.fillText('±'+max.toFixed(1),4,14);x.strokeStyle='#303940';x.beginPath();x.moveTo(0,h/2);x.lineTo(w,h/2);x.stroke();['#76caff','#f1bd76','#88d5ad'].forEach((color,k)=>{x.strokeStyle=color;x.beginPath();let previous;rows.forEach(s=>{let px=(s[0]-now+60)/60*w,py=h/2-s[1][start+k]*scale/max*(h/2-24);if(!previous||s[0]-previous[0]>1||s[1][1]<previous[1][1])x.moveTo(px,py);else x.lineTo(px,py);previous=s});x.stroke()})}
-function render(){let s=snapshot,p=s.samples.at(-1)?.[1],fresh=s.connected&&s.age<=1;$('link').textContent=(s.connected?'Serial connected':'Serial stopped')+' · '+(fresh?'LIVE':'STALE');$('link').className=fresh?'':'warning';$('state').textContent=p?names[p[8]]+([4,5].includes(p[8])?' · simulated':''):'Awaiting telemetry';$('state').style.opacity=fresh?1:.5;$('flags').textContent=p?`Armed ${!!(p[9]&1)} · Fired ${!!(p[9]&2)}`:'Armed — · Fired —';$('meta').textContent=`Age ${p?s.age.toFixed(1)+'s':'—'} · Seq ${p?p[0]:'—'} · Log ${s.log}`;['ARM','DISARM','FIRE'].forEach(n=>$(n).disabled=pending||!fresh||(n==='ARM'&&p[8]!==0)||(n==='FIRE'&&(p[8]!==1||!(p[9]&1))));if(p){$('barometer').textContent=`Pressure ${(p[10]/100).toFixed(2)} hPa / Temperature ${(p[11]/100).toFixed(2)} ?C`;$('acc').textContent=['X','Y','Z'].map((a,k)=>a+' '+p[k+2]).join(' / ');$('gyro').textContent=['X','Y','Z'].map((a,k)=>a+' '+(p[k+5]/10).toFixed(1)).join(' / ')}draw('a',2,1);draw('g',5,.1);if(!paused){let lines=s.terminal,idx=cleared?lines.indexOf(cleared):-1;$('terminal').textContent=lines.slice(idx+1).join('\n');$('terminal').scrollTop=$('terminal').scrollHeight}}
-async function poll(){try{const r=await fetch('/api/snapshot');if(!r.ok)throw Error();snapshot=await r.json();render()}catch{ $('link').textContent='Dashboard disconnected · STALE';['ARM','DISARM','FIRE'].forEach(n=>$(n).disabled=true)}setTimeout(poll,500)}
-['ARM','DISARM','FIRE'].forEach(n=>{$(n).disabled=true;$(n).onclick=async()=>{if(n!=='DISARM'&&!confirm(`Send ${n} to bench payload? Delivery cannot be guaranteed.`))return;pending=true;render();try{const r=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:n})}),j=await r.json();$('status').textContent=j.error||j.status}catch{$('status').textContent='Request failed; delivery unknown. Do not retry blindly.'}finally{pending=false}}});$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'Resume scrolling':'Pause scrolling';if(snapshot)render()};$('clear').onclick=()=>{cleared=snapshot?.terminal.at(-1)||'';$('terminal').textContent=''};window.onresize=()=>snapshot&&render();poll();
-</script></html>
+<html lang="en" data-type="software">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GMAT | Rocket telemetry</title><meta name="description" content="Local rocket telemetry, sensor-relative 3D motion and payload controls."><meta name="page-type" content="software"><meta name="site-kind" content="software">
+<link rel="stylesheet" href="/dashboard.css"></head>
+<body>
+<a class="skip" href="#workspace">Skip to telemetry</a>
+<header><div class="brand">GMAT</div><div class="session"><span id="source">Awaiting source</span><span id="link" class="warning">CONNECTING</span></div></header>
+<main id="workspace">
+<h1 class="sr-only">Rocket telemetry</h1>
+<div class="workspace">
+<section class="vehicle" aria-labelledby="vehicle-title">
+<div class="panel-head"><h2 id="vehicle-title">Vehicle motion</h2></div>
+<div class="motion-note"><span id="motion-status" role="status">Loading 3D view...</span></div>
+<div id="rocket-view" tabindex="0" aria-label="3D rocket. Drag to orbit the camera. Use arrow keys to rotate the view and plus or minus to zoom." title="Drag to orbit, scroll to zoom, arrow keys when focused"><div id="render-error" role="status">Preparing rocket geometry...</div></div>
+<div class="view-controls"><button id="reset-motion" disabled>Reset motion</button><button id="pause-motion" disabled aria-pressed="false">Pause 3D</button><button id="reset-camera" disabled>Reset camera</button></div>
+</section>
+<div class="telemetry">
+<section class="flight" aria-labelledby="flight-title"><div class="panel-head"><h2 id="flight-title">Payload state</h2><span id="sequence">SEQ &mdash;</span></div><div id="state">Awaiting telemetry</div><div id="states" class="state-track"></div><div class="flight-footer"><span id="flags">Armed &mdash;</span><span id="age">Age &mdash;</span></div></section>
+<section class="environment" aria-label="Barometer telemetry"><div><span class="eyebrow">PRESSURE</span><output id="pressure">&mdash;<small>hPa</small></output></div><div><span class="eyebrow">TEMPERATURE</span><output id="temperature">&mdash;<small>&deg;C</small></output></div></section>
+<section class="plot"><div class="panel-head"><h2>Acceleration <small>mg</small></h2><div class="legend"><span>X</span><span>Y</span><span>Z</span></div></div><output id="acc">X &mdash; / Y &mdash; / Z &mdash;</output><canvas id="a" aria-label="Acceleration XYZ over the last 60 seconds"></canvas></section>
+<section class="plot"><div class="panel-head"><h2>Angular velocity <small>&deg;/s</small></h2><div class="legend"><span>X</span><span>Y</span><span>Z</span></div></div><output id="gyro">X &mdash; / Y &mdash; / Z &mdash;</output><canvas id="g" aria-label="Gyroscope XYZ over the last 60 seconds"></canvas></section>
+</div></div>
+<section class="terminal"><div class="panel-head"><h2>Serial</h2><div><button id="pause">Pause</button><button id="clear">Clear</button></div></div><pre id="terminal" tabindex="0" aria-label="Raw serial telemetry"></pre></section>
+<footer><span id="meta">Waiting for telemetry log</span></footer>
+</main><script type="module" src="/app.js"></script></body></html>

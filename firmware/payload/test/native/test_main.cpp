@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <initializer_list>
-#include "bench.h"
+#include "payload_control.h"
 #include "radio_frame.h"
 #include "barometer.h"
 
@@ -28,26 +28,31 @@ int main() {
     assert(!calibration.load(blank));
     memset(blank, 255, sizeof(blank)); assert(!calibration.load(blank));
     assert(frameCrc("123456789", 9) == 0x29b1);
-    char frame[62];
+    uint8_t frame[31];
     uint8_t sent[28] = {}, received[28] = {};
     for (unsigned i = 0; i < 28; ++i) sent[i] = uint8_t(i * 11);
-    assert(encodeFrame('T', sent, 28, frame) == 62);
+    assert(encodeFrame('T', sent, 28, frame) == 31);
     RadioFrame framing;
-    for (unsigned i = 0; i < 62; ++i)
-        assert(framing.push(frame[i], 'T', received, 28) == (i == 61));
+    assert(!framing.push('X', 'T', received, 28)); // Noise before a frame is dropped.
+    for (unsigned i = 0; i < 31; ++i)
+        assert(framing.push(frame[i], 'T', received, 28) == (i == 30));
     assert(memcmp(sent, received, 28) == 0);
-    frame[4] = frame[4] == '0' ? '1' : '0';
-    for (char c : frame) assert(!framing.push(c, 'T', received, 28));
-    for (int i = 0; i < 100; ++i) assert(!framing.push('X', 'T', received, 28));
-    assert(!framing.push('\n', 'T', received, 28));
+    frame[4] ^= 1; // One flipped payload bit must fail CRC.
+    for (unsigned i = 0; i < 31; ++i) assert(!framing.push(frame[i], 'T', received, 28));
+    frame[4] ^= 1;
+    for (unsigned i = 0; i < 10; ++i) framing.push(frame[i], 'T', received, 28); // Truncated frame.
+    for (unsigned n = 0; n < 3; ++n)
+        for (unsigned i = 0; i < 31; ++i) framing.push(frame[i], 'T', received, 28);
+    assert(memcmp(sent, received, 28) == 0); // Resyncs within two frames.
     for (uint8_t cmd = 1; cmd <= 3; ++cmd) {
-        size_t size = encodeFrame('C', &cmd, 1, frame);
-        assert(size == 8);
+        const size_t size = encodeFrame('C', &cmd, 1, frame);
+        assert(size == 4);
         uint8_t actual = 0;
         for (size_t i = 0; i < size; ++i)
             assert(framing.push(frame[i], 'C', &actual, 1) == (i == size - 1));
         assert(actual == cmd);
     }
+    assert(!framing.push('T', 'C', received, 1)); // Wrong type never starts a frame.
     assert(encodeFrame('X', sent, 28, frame) == 0);
     assert(encodeFrame('T', sent, 22, frame) == 0); // Reject old schema.
     assert(sizeof(Telemetry) == 28 && sizeof(CommandPacket) == 1);
@@ -78,28 +83,29 @@ int main() {
     parser.push('\0', command, complete);
     assert(!line(parser, "ARM\n", command));
     assert(line(parser, "ARM\n", command)); // Recovery only after the bad line ends.
-    BenchState bench;
-    assert(bench.state == State::IDLE && bench.flags() == 0);
-    assert(!bench.apply(Command::FIRE, 0));
-    assert(bench.apply(Command::ARM, 0) && bench.flags() == 1);
-    assert(!bench.apply(Command::ARM, 0));
-    assert(bench.apply(Command::FIRE, 0xfffffff0) && bench.flags() == 0);
-    bench.tick(184, 200); // Rollover, but EJECT must be reported at least once.
-    assert(bench.state == State::EJECT);
-    bench.reported();
-    bench.tick(183, 200);
-    assert(bench.state == State::EJECT);
-    bench.tick(184, 200);
-    assert(bench.state == State::DESCENT && !bench.apply(Command::ARM, 184));
-    for (int state = 0; state <= 6; ++state) {
-        bench.state = static_cast<State>(state);
-        assert(bench.apply(Command::DISARM, 0) && bench.state == State::IDLE);
-        bench.state = static_cast<State>(state);
-        bench.fail();
-        assert(bench.state == State::IDLE && bench.flags() == 0);
-        assert(!bench.apply(Command::ARM, 0) && !bench.apply(Command::FIRE, 0));
-        assert(bench.apply(Command::DISARM, 0) && bench.fault);
+    PayloadState payloadState;
+    assert(payloadState.state == State::IDLE && payloadState.flags() == 0);
+    assert(!payloadState.apply(Command::FIRE, 0));
+    assert(payloadState.apply(Command::ARM, 0) && payloadState.flags() == 1);
+    assert(!payloadState.apply(Command::ARM, 0));
+    assert(payloadState.apply(Command::FIRE, 0xfffffff0) && payloadState.flags() == 2);
+    assert(payloadState.fireOn(0xfffffff1, 1000) && !payloadState.fireOn(0xffffffd8, 1000)); // Pulse ends 1000 ms after FIRE.
+    payloadState.tick(184, 200); // Rollover, but EJECT must be reported at least once.
+    assert(payloadState.state == State::EJECT);
+    payloadState.reported();
+    payloadState.tick(183, 200);
+    assert(payloadState.state == State::EJECT);
+    payloadState.tick(184, 200);
+    assert(payloadState.state == State::DESCENT && payloadState.flags() == 2 && !payloadState.apply(Command::ARM, 184)); // Fired latches.
+    for (int state = 0; state <= 3; ++state) {
+        payloadState.state = static_cast<State>(state);
+        assert(payloadState.apply(Command::DISARM, 0) && payloadState.state == State::IDLE && payloadState.flags() == 0 && !payloadState.fireOn(0, 1000));
+        payloadState.state = static_cast<State>(state);
+        payloadState.fail();
+        assert(payloadState.state == State::IDLE && payloadState.flags() == 0 && !payloadState.fireOn(0, 1000));
+        assert(!payloadState.apply(Command::ARM, 0) && !payloadState.apply(Command::FIRE, 0));
+        assert(payloadState.apply(Command::DISARM, 0) && payloadState.fault);
     }
     assert(!elapsed(183, 0xfffffff0, 200) && elapsed(184, 0xfffffff0, 200));
-    puts("All payload bench checks passed");
+    puts("All payload checks passed");
 }

@@ -1,9 +1,9 @@
 #pragma once
 #include <stdio.h>
-#include "bench.h"
+#include "packet.h"
 
 inline bool validTelemetry(const Telemetry& p, size_t size) {
-    return size == sizeof(p) && p.state <= uint8_t(State::LANDED) && (p.flags & ~3u) == 0 &&
+    return size == sizeof(p) && p.state <= uint8_t(State::DESCENT) && (p.flags & ~3u) == 0 &&
            p.pressure_pa >= 30000 && p.pressure_pa <= 110000 &&
            p.temperature_centi_c >= -4000 && p.temperature_centi_c <= 8500;
 }

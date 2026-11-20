@@ -48,24 +48,29 @@ struct SerialCommands {
     }
 };
 
-struct BenchState {
+struct PayloadState {
     State state = State::IDLE;
     bool fault = false;
     bool ejectReported = false;
     uint32_t ejectAt = 0;
-    void fail() { fault = true; state = State::IDLE; ejectReported = false; }
+    bool firing = false;
+    uint32_t fireAt = 0;
+    bool fired = false;
+    void fail() { fault = true; state = State::IDLE; ejectReported = false; firing = false; fired = false; }
     bool apply(Command command, uint32_t now) {
-        if (command == Command::DISARM) { state = State::IDLE; ejectReported = false; return true; }
+        if (command == Command::DISARM) { state = State::IDLE; ejectReported = false; firing = false; fired = false; return true; }
         if (fault) return false;
         if (command == Command::ARM && state == State::IDLE) { state = State::ARMED; return true; }
         if (command == Command::FIRE && state == State::ARMED) {
-            state = State::EJECT; ejectAt = now; ejectReported = false; return true;
+            state = State::EJECT; ejectAt = now; ejectReported = false; firing = true; fireAt = now; fired = true; return true;
         }
         return false;
     }
+    // Igniter current is never held on: one bounded pulse per accepted FIRE.
+    bool fireOn(uint32_t now, uint32_t pulseMs) const { return firing && !elapsed(now, fireAt, pulseMs); }
     void tick(uint32_t now, uint32_t interval) {
         if (state == State::EJECT && ejectReported && elapsed(now, ejectAt, interval)) state = State::DESCENT;
     }
     void reported() { if (state == State::EJECT) ejectReported = true; }
-    uint8_t flags() const { return state == State::ARMED ? 1 : 0; } // Actual-fired bit stays clear.
+    uint8_t flags() const { return (state == State::ARMED ? 1 : 0) | (fired ? 2 : 0); }
 };

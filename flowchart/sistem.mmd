@@ -1,0 +1,14 @@
+flowchart TD
+    A([Start]) --> B["Payload reads MPU6050 and BMP280<br/>every 200 ms"]
+    B --> C{"Valid readings?"}
+    C -->|No| D["Firmware reports a fault"]
+    C -->|Yes| E["Payload builds a telemetry packet"]
+    E -->|If SD is available| F[(CSV on payload SD card)]
+    E -->|If radio is ready| G["E32 LoRa sends the packet to the GCS ESP32"]
+    G --> H["GCS forwards telemetry over USB serial"]
+    H --> I{"Did the Python bridge receive<br/>a valid telemetry line?"}
+    S["Simulation mode<br/>Synthetic data source"] --> I
+    I -->|No| J["Skip the line in the telemetry log"]
+    I -->|Yes| K["Add UTC receive timestamp"]
+    K --> L[(CSV on laptop)]
+    L --> M["Forward the sample to the local dashboard"]

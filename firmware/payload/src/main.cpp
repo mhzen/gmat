@@ -1,19 +1,77 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <SD.h>
+#include <SPI.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+#include <atomic>
+#include <errno.h>
+#include <stdio.h>
+#include <unistd.h>
 #include "e32.h"
 #include "config.h"
-#include "bench.h"
+#include "payload_control.h"
 #include "barometer.h"
 
-BenchState bench;
-SerialCommands serialCommands;
+PayloadState payloadState;
 bool imuHealthy = false, barometerHealthy = false;
 BarometerCalibration barometer;
 E32 radio;
 uint32_t lastTelemetry = 0, sequence = 0;
 
+namespace {
+constexpr char logPath[] = "/sd/flight_log.csv";
+constexpr char logHeader[] = "seq,t_ms,ax,ay,az,gx,gy,gz,state,flags,pressure_pa,temperature_centi_c\n";
+struct LogRow {
+    char bytes[128];
+    size_t length;
+};
+QueueHandle_t logQueue = nullptr;
+std::atomic<bool> logFailed{false};
+bool logOverflowReported = false;
+
+bool writeLog(FILE* file, const char* bytes, size_t length) {
+    return fwrite(bytes, 1, length, file) == length &&
+        fflush(file) == 0 && fsync(fileno(file)) == 0;
+}
+
+void logWriter(void* argument) {
+    FILE* file = static_cast<FILE*>(argument);
+    LogRow row;
+    for (;;) {
+        if (xQueueReceive(logQueue, &row, portMAX_DELAY) == pdTRUE &&
+            !writeLog(file, row.bytes, row.length)) break;
+    }
+    logFailed.store(true);
+    Serial.println("# SD log write failed; logging disabled until reset");
+    fclose(file);
+    SD.end();
+    vTaskDelete(nullptr);
+}
+
+const char* startLog() {
+    SPI.begin(config::sck, config::miso, config::mosi, config::sdCs);
+    if (!SD.begin(config::sdCs)) return "card mount failed";
+    if (unlink(logPath) != 0 && errno != ENOENT) return "old log removal failed";
+    FILE* file = fopen(logPath, "w");
+    if (!file) return "log creation failed";
+    if (!writeLog(file, logHeader, sizeof(logHeader) - 1)) {
+        fclose(file);
+        return "header write failed";
+    }
+    logQueue = xQueueCreate(8, sizeof(LogRow));
+    if (logQueue && xTaskCreatePinnedToCore(logWriter, "sdLog", 4096, file, 1, nullptr,
+                                          1 - xPortGetCoreID()) == pdPASS) return nullptr;
+    if (logQueue) vQueueDelete(logQueue);
+    logQueue = nullptr;
+    fclose(file);
+    return "writer startup failed";
+}
+}
+
 void fault(const char* reason) {
-    bench.fail();
+    payloadState.fail();
     Serial.printf("# FAULT: %s; reset required\n", reason);
     radio.stop();
 }
@@ -76,17 +134,7 @@ bool readBarometer(uint32_t& pressure, int16_t& temperature) {
 }
 
 void commandReceived(Command command) {
-    Serial.println(bench.apply(command, millis()) ? "# command accepted (simulation only)" : "# command rejected");
-}
-
-void pollSerial() {
-    // Bound work per loop so continuous serial traffic cannot starve sensor/radio checks.
-    for (unsigned i = 0; i < 32 && Serial.available(); ++i) {
-        Command command;
-        bool complete;
-        if (serialCommands.push(char(Serial.read()), command, complete)) commandReceived(command);
-        else if (complete) Serial.println("# malformed serial command");
-    }
+    Serial.println(payloadState.apply(command, millis()) ? "# command accepted" : "# command rejected");
 }
 
 void pollRadio(uint32_t now) {
@@ -94,7 +142,7 @@ void pollRadio(uint32_t now) {
     if (!radio.enabled) return;
     for (unsigned i = 0; i < 64 && Serial2.available(); ++i) {
         CommandPacket packet;
-        if (radio.frame.push(char(Serial2.read()), 'C', &packet, sizeof(packet))) {
+        if (radio.frame.push(uint8_t(Serial2.read()), 'C', &packet, sizeof(packet))) {
             Command command;
             if (radioCommand(&packet.cmd, sizeof(packet), command)) commandReceived(command);
             else Serial.println("# malformed radio command");
@@ -116,31 +164,45 @@ void telemetry(uint32_t now) {
         fault("BMP280 read/configuration/range failure");
         return;
     }
-    // TODO: Calibrate on hardware. Preserve sensor axes; ask mounting orientation before directional flight logic.
-    // TODO: Flight thresholds, altitude estimation and deployment timing need separate validation.
-    Telemetry packet = {sequence++, now,
+    const Telemetry packet = {sequence++, now,
         accelerationMg(signedWord(raw)), accelerationMg(signedWord(raw + 2)),
         accelerationMg(signedWord(raw + 4)), gyroTenths(signedWord(raw + 8)),
         gyroTenths(signedWord(raw + 10)), gyroTenths(signedWord(raw + 12)),
-        uint8_t(bench.state), bench.flags(), pressure, temperature}; // Temperature bytes 6..7 are discarded.
-    Serial.printf("%lu,%lu,%d,%d,%d,%d,%d,%d,%u,%u,%lu,%d\n",
+        uint8_t(payloadState.state), payloadState.flags(), pressure, temperature}; // Temperature bytes 6..7 are discarded.
+    LogRow row{};
+    const int length = snprintf(row.bytes, sizeof(row.bytes), "%lu,%lu,%d,%d,%d,%d,%d,%d,%u,%u,%lu,%d\n",
         (unsigned long)packet.seq, (unsigned long)packet.t_ms,
-        packet.ax, packet.ay, packet.az, packet.gx, packet.gy, packet.gz, packet.state, packet.flags, (unsigned long)packet.pressure_pa, packet.temperature_centi_c);
-    bench.reported();
+        packet.ax, packet.ay, packet.az, packet.gx, packet.gy, packet.gz,
+        unsigned(packet.state), unsigned(packet.flags), (unsigned long)packet.pressure_pa, packet.temperature_centi_c);
+    if (length > 0 && size_t(length) < sizeof(row.bytes)) {
+        row.length = size_t(length);
+        Serial.write(reinterpret_cast<const uint8_t*>(row.bytes), row.length);
+        if (logQueue && !logFailed.load() && xQueueSend(logQueue, &row, 0) != pdTRUE &&
+            !logOverflowReported) {
+            logOverflowReported = true;
+            Serial.println("# SD log queue full; telemetry rows dropped");
+        }
+    } else {
+        Serial.println("# telemetry CSV formatting failed");
+    }
+    payloadState.reported();
     if (radio.ready() && !radio.send('T', &packet, sizeof(packet))) fault("E32 UART write failed");
     // Busy modem skips this RF sample; fresh USB telemetry continues without a queue.
 }
 
 void setup() {
-    // TODO: Verify driver polarity, hardware interlocks and boot/reset/brownout safety before any firing implementation.
+    // TODO: Hardware-verify driver stage, interlocks and reset/brownout behaviour; GPIO25 floats until setup() runs.
     digitalWrite(config::pyroControl, LOW);
-    pinMode(config::pyroControl, OUTPUT); // Safe-low only; physical firing is not implemented.
+    pinMode(config::pyroControl, OUTPUT); // Safe-low at boot; HIGH only while the FIRE pulse runs.
     digitalWrite(config::sdCs, HIGH);
-    pinMode(config::sdCs, OUTPUT); // Deselect unused SD card.
-    // TODO: Implement SD logging with explicit write/full-card errors and bounded impact on sensor/radio timing.
-    // TODO: Calibrate GPIO35 ADC with the 33k/10k divider; confirm battery range before voltage reporting or limits.
+    pinMode(config::sdCs, OUTPUT); // Deselect the SD card until SPI starts.
     Serial.begin(115200);
-    Serial.println("# BENCH ONLY: simulated EJECT; no firing output");
+    Serial.printf("# WARNING: live pyro output on GPIO25 for %lums per FIRE; keep igniter disconnected during hardware tests\n",
+        (unsigned long)config::firePulseMs);
+    if (const char* error = startLog()) {
+        Serial.printf("# SD %s; logging disabled until reset\n", error);
+        SD.end();
+    }
     if (Wire.begin(config::sda, config::scl, 100000)) {
         Wire.setTimeOut(20);
         imuHealthy = startImu();
@@ -148,15 +210,15 @@ void setup() {
     }
     if (!barometerHealthy) fault("BMP280 initialization failed");
     if (!imuHealthy) fault("IMU initialization failed");
-    if (!bench.fault) radio.begin();
+    if (!payloadState.fault) radio.begin();
     if (!config::radioEnabled) Serial.println("# E32 radio disabled");
     lastTelemetry = millis();
 }
 
 void loop() {
     uint32_t now = millis();
-    bench.tick(now, config::telemetryMs);
-    pollSerial();
+    payloadState.tick(now, config::telemetryMs);
+    digitalWrite(config::pyroControl, payloadState.fireOn(now, config::firePulseMs) ? HIGH : LOW);
     pollRadio(millis());
     now = millis();
     if (imuHealthy && barometerHealthy && elapsed(now, lastTelemetry, config::telemetryMs)) {

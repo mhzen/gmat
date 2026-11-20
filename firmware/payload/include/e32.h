@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include "config.h"
-#include "bench.h"
+#include "payload_control.h"
 #include "radio_frame.h"
 
 // TODO: Verify persisted E32 settings against the actual module revision; no configuration writes yet.
@@ -43,10 +43,10 @@ struct E32 {
     }
     bool send(char type, const void* bytes, size_t size) {
         if (!ready() || digitalRead(config::radioAux) == LOW) return false;
-        char out[1 + sizeof(Telemetry)*2 + 5];
+        uint8_t out[1 + sizeof(Telemetry) + 2];
         size_t count = encodeFrame(type, bytes, size, out);
         if (!count || Serial2.availableForWrite() < int(count)) return false;
-        if (Serial2.write(reinterpret_cast<const uint8_t*>(out), count) != count) return false;
+        if (Serial2.write(out, count) != count) return false;
         waitMs = (uint32_t(count) * 10000 + config::radioBaud - 1) / config::radioBaud + 5;
         started = millis(); busy = true;
         return true;

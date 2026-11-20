@@ -1,15 +1,12 @@
-"""Bench serial logger and interactive command sender. No delivery guarantee."""
+"""Serial telemetry logger and USB telemetry reader."""
 import argparse
 import csv
 from datetime import datetime, timezone
-import queue
 import re
 import sys
-import threading
-import time
 
-FIELDS = 'seq,t_ms,ax,ay,az,gx,gy,gz,state,flags,pressure_pa,temperature_centi_c,rx_time'.split(',')
-LIMITS = [(0, 2**32 - 1)] * 2 + [(-32768, 32767)] * 6 + [(0, 6), (0, 3), (30000, 110000), (-4000, 8500)]
+FIELDS = 'seq,t_ms,ax,ay,az,gx,gy,gz,state,pressure_pa,temperature_centi_c,rx_time'.split(',')
+LIMITS = [(0, 2**32 - 1)] * 2 + [(-32768, 32767)] * 6 + [(0, 3), (0, 3), (30000, 110000), (-4000, 8500)]
 
 
 def parse(line):
@@ -40,31 +37,7 @@ class Lines:
                 self.overflow = True
 
 
-def command_bytes(text):
-    if text not in ('ARM', 'DISARM', 'FIRE'):
-        raise ValueError('use exact ARM, DISARM or FIRE')
-    return (text + '\n').encode('ascii')
-
-
-def read_commands(commands):
-    # Never accumulate commands for later replay after a stalled serial link.
-    while True:
-        text = sys.stdin.readline(258)
-        if not text:
-            return
-        if not text.endswith('\n'):
-            while text and not text.endswith('\n'):
-                text = sys.stdin.readline(258)
-            print('# rejected overlong/unterminated command', file=sys.stderr)
-            continue
-        try:
-            data = command_bytes(text.removesuffix('\n').removesuffix('\r'))
-            commands.put_nowait((data, time.monotonic()))
-        except (ValueError, queue.Full) as error:
-            print(f'# command rejected: {error}', file=sys.stderr)
-
-
-def run(port, log, output, commands, on_event=None):
+def run(port, log, output, on_event=None):
     def event(kind, value):
         if on_event:
             on_event(kind, value)
@@ -73,19 +46,6 @@ def run(port, log, output, commands, on_event=None):
     log.flush()
     framer = Lines()
     while True:
-        try:
-            data, entered = commands.get_nowait()
-        except queue.Empty:
-            pass
-        else:
-            if time.monotonic() - entered > 0.5:
-                event('status', 'stale command rejected')
-                print('# stale command rejected', file=sys.stderr)
-            else:
-                if port.write(data) != len(data):
-                    raise OSError('short serial command write; delivery unknown')
-                event('status', 'Written to USB; delivery unknown')
-                print('# command written to USB; payload receipt unknown', file=sys.stderr)
         for line in framer.push(port.read(256)):
             event('raw', line.decode('ascii', errors='backslashreplace') if line is not None else '[overlong line]')
             received = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
@@ -99,10 +59,12 @@ def run(port, log, output, commands, on_event=None):
             except (ValueError, UnicodeError) as error:
                 print(f'# telemetry rejected: {error}', file=sys.stderr)
                 continue
-            writer.writerow(values + [received])
+            state = 'FIRE_ACCEPTED' if values[8] in (2, 3) else 'IDLE'
+            row = values[:8] + [state] + values[10:] + [received]
+            writer.writerow(row)
             log.flush()
             event('telemetry', values + [received])
-            print(','.join(map(str, values + [received])), file=output, flush=True)
+            print(','.join(map(str, row)), file=output, flush=True)
 
 
 def main():
@@ -114,14 +76,12 @@ def main():
     try:
         # Exclusive creation prevents accidental destruction of earlier test logs.
         with open(args.log, 'x', newline='', encoding='utf-8') as log:
-            with serial.Serial(args.port, 115200, timeout=0.1, write_timeout=0.2) as port:
-                commands = queue.Queue(maxsize=1)
-                threading.Thread(target=read_commands, args=(commands,), daemon=True).start()
-                run(port, log, sys.stdout, commands)
+            with serial.Serial(args.port, 115200, timeout=0.1) as port:
+                run(port, log, sys.stdout)
     except KeyboardInterrupt:
         return 0
     except (OSError, serial.SerialException) as error:
-        print(f'# bridge stopped: {error}; no reconnect or command retry', file=sys.stderr)
+        print(f'# bridge stopped: {error}; no reconnect', file=sys.stderr)
         return 1
     return 0
 

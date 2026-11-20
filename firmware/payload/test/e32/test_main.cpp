@@ -6,7 +6,8 @@ FakeSerial Serial2;
 int main() {
     E32 r;
     r.begin();
-    assert(!r.enabled && accesses == 0); // Disabled means no hardware access.
+    assert(r.enabled == config::radioEnabled); // Disabled means no hardware access.
+    if (!r.enabled) assert(accesses == 0);
     r.enabled = true;
     assert(r.poll(0) && !r.ready());
     assert(r.poll(100) && r.ready());

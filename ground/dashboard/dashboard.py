@@ -1,11 +1,11 @@
-"""Loopback-only bench dashboard."""
+"""Loopback-only telemetry dashboard."""
 import argparse
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 from pathlib import Path
-import queue
 import sys
 import threading
 import time
@@ -15,11 +15,11 @@ import bridge
 
 
 class State:
-    def __init__(self, log):
+    def __init__(self, log, simulate=False):
+        self.simulate = simulate
         self.lock = threading.Lock()
         self.samples = deque(maxlen=300)
         self.terminal = deque(maxlen=200)
-        self.commands = queue.Queue(maxsize=1)
         self.connected = False
         self.last = 0
         self.log = log
@@ -35,19 +35,8 @@ class State:
 
     def snapshot(self):
         with self.lock:
-            return dict(connected=self.connected, age=time.monotonic()-self.last,
+            return dict(connected=self.connected, simulate=self.simulate, age=time.monotonic()-self.last,
                         samples=list(self.samples), terminal=list(self.terminal), log=self.log)
-
-    def command(self, name):
-        data = bridge.command_bytes(name)
-        with self.lock:
-            if not self.connected or time.monotonic()-self.last > 1:
-                raise ValueError('No fresh telemetry')
-            p = self.samples[-1][1]
-            if name == 'ARM' and p[8] != 0 or name == 'FIRE' and (p[8] != 1 or not p[9] & 1):
-                raise ValueError('Payload state rejects command')
-            self.commands.put_nowait((data, time.monotonic()))
-        self.event('status', name + ' queued; delivery unknown')
 
 
 def handler(state):
@@ -64,55 +53,68 @@ def handler(state):
                 self.reply(200, json.dumps(state.snapshot()).encode())
             elif self.path == '/':
                 self.reply(200, Path(__file__).with_name('index.html').read_bytes(), 'text/html; charset=utf-8')
+            elif self.path in ('/dashboard.css', '/app.js', '/rocket.js', '/motion.mjs', '/vendor/three.module.js'):
+                mime = 'text/css' if self.path.endswith('.css') else 'text/javascript'
+                self.reply(200, Path(__file__).parent.joinpath(self.path[1:]).read_bytes(), mime)
             else:
                 self.reply(404, b'{}')
-
-        def do_POST(self):
-            host = '127.0.0.1:8000'
-            if (self.path != '/api/command' or self.headers.get('Host') != host or
-                    self.headers.get('Origin') != 'http://' + host or
-                    self.headers.get('Content-Type') != 'application/json'):
-                self.reply(403, b'{"error":"Forbidden"}')
-                return
-            try:
-                size = int(self.headers.get('Content-Length', '0'))
-                if not 0 < size <= 64:
-                    raise ValueError('Invalid body size')
-                body = json.loads(self.rfile.read(size))
-                if not isinstance(body, dict) or not isinstance(body.get('command'), str):
-                    raise ValueError('Invalid command')
-                state.command(body['command'])
-                self.reply(200, b'{"status":"Queued; delivery unknown"}')
-            except (ValueError, queue.Full) as error:
-                self.reply(400, json.dumps({'error': str(error) or 'Command queue full'}).encode())
 
         def log_message(self, *args):
             pass
     return Handler
 
 
+class SimulatedPort:
+    """Repeating visual demo, not a flight physics model."""
+    def __init__(self):
+        self.sequence = 0
+
+    def read(self, size):
+        time.sleep(0.2)
+        t = self.sequence * 0.2
+        phase = t % 60
+        state = next((i for i, end in enumerate((10, 26, 30, 60)) if phase < end), 3)
+        altitude = max(0, 1 - abs(phase - 25) / 25) * 500
+        values = [self.sequence, self.sequence * 200,
+                  round(100 * math.sin(t)), round(80 * math.cos(t * 1.3)),
+                  4000 if state == 2 else 1000 + round(100 * math.sin(t * 2)),
+                  round(200 * math.sin(t)), round(150 * math.cos(t)), round(100 * math.sin(t / 2)),
+                  state, int(state == 1), round(101325 * math.exp(-altitude / 8434)),
+                  2500 + round(50 * math.sin(t / 10))]
+        self.sequence += 1
+        return (','.join(map(str, values)) + '\n').encode('ascii')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--port', required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--port')
+    source.add_argument('--simulate', action='store_true')
     parser.add_argument('--log', required=True)
     args = parser.parse_args()
-    state = State(args.log)
+    state = State(args.log, args.simulate)
     def worker():
         try:
-            import serial
             with open(args.log, 'x', newline='', encoding='utf-8') as log:
-                with serial.Serial(args.port, 115200, timeout=0.1, write_timeout=0.2) as port:
+                if args.simulate:
                     with state.lock:
                         state.connected = True
-                    bridge.run(port, log, sys.stdout, state.commands, state.event)
+                    state.event('status', 'SIMULATION: fake data')
+                    bridge.run(SimulatedPort(), log, sys.stdout, state.event)
+                    return
+                import serial
+                with serial.Serial(args.port, 115200, timeout=0.1) as port:
+                    with state.lock:
+                        state.connected = True
+                    bridge.run(port, log, sys.stdout, state.event)
         except Exception as error:
-            state.event('status', f'Bridge stopped: {error}; delivery unknown')
+            state.event('status', f'Bridge stopped: {error}')
         finally:
             with state.lock:
                 state.connected = False
     server = ThreadingHTTPServer(('127.0.0.1', 8000), handler(state))
     threading.Thread(target=worker, daemon=True).start()
-    print('Bench dashboard: http://127.0.0.1:8000')
+    print('Telemetry dashboard: http://127.0.0.1:8000')
     try:
         server.serve_forever()
     except KeyboardInterrupt:

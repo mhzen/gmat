@@ -1,5 +1,4 @@
 import io
-import queue
 import unittest
 from unittest.mock import patch
 import bridge
@@ -7,9 +6,9 @@ import bridge
 
 class Tests(unittest.TestCase):
     def test_ranges(self):
-        self.assertEqual(bridge.parse(b'4294967295,0,-32768,32767,0,0,0,0,6,3,100653,2508')[2], -32768)
+        self.assertEqual(bridge.parse(b'4294967295,0,-32768,32767,0,0,0,0,3,3,100653,2508')[2], -32768)
         for line in (b'1,2', b'-1,0,0,0,0,0,0,0,0,0',
-                     b'0,0,32768,0,0,0,0,0,0,0', b'0,0,0,0,0,0,0,0,7,0',
+                     b'0,0,32768,0,0,0,0,0,0,0', b'0,0,0,0,0,0,0,0,4,0',
                      b'0,0,0,0,0,0,0,0,0,4', b' 0,0,0,0,0,0,0,0,0,0', b'\xff'):
             if line.count(b',') == 9:
                 line += b',100653,2508'
@@ -31,53 +30,28 @@ class Tests(unittest.TestCase):
         self.assertEqual(list(f.push(b'AR')), [])
         self.assertEqual(list(f.push(b'M\r\n' + b'x' * 300 + b'\nOK\n')), [b'ARM', None, b'OK'])
 
-    def test_commands(self):
-        for text in ('ARM', 'DISARM', 'FIRE'):
-            self.assertEqual(bridge.command_bytes(text), (text + '\n').encode())
-        for text in ('arm', 'FIRE ', '', 'ARM\nFIRE'):
-            with self.assertRaises(ValueError):
-                bridge.command_bytes(text)
-
-    def test_logging_disconnect_and_command(self):
+    def test_logging_and_disconnect(self):
         class Port:
             reads = 0
-            sent = []
-            def write(self, data):
-                self.sent.append(data)
-                return len(data)
             def read(self, size):
                 self.reads += 1
                 if self.reads > 1:
                     raise OSError('disconnected')
-                return b'# radio disabled\nbad\n0,0,0,0,0,0,0,0,0,0,100653,2508\n'
+                return (b'# radio disabled\nbad\n0,0,0,0,0,0,0,0,0,0,100653,2508\n'
+                        b'1,200,0,0,0,0,0,0,1,1,100654,2509\n'
+                        b'2,400,0,0,0,0,0,0,2,2,100655,2510\n'
+                        b'3,600,0,0,0,0,0,0,3,2,100656,2511\n')
         port = Port()
-        commands = queue.Queue()
-        commands.put((b'ARM\n', bridge.time.monotonic()))
         log, output = io.StringIO(), io.StringIO()
         with patch('sys.stderr', io.StringIO()), self.assertRaises(OSError):
-            bridge.run(port, log, output, commands)
-        self.assertEqual(port.sent, [b'ARM\n'])
+            bridge.run(port, log, output)
         rows = list(bridge.csv.reader(io.StringIO(log.getvalue())))
-        self.assertEqual(rows[0], bridge.FIELDS)
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][8:], ['state', 'pressure_pa', 'temperature_centi_c', 'rx_time'])
+        self.assertEqual([row[8] for row in rows[1:]], ['IDLE', 'IDLE', 'FIRE_ACCEPTED', 'FIRE_ACCEPTED'])
+        self.assertTrue(all(len(row) == len(rows[0]) for row in rows))
+        self.assertEqual(rows[-1][9:11], ['100656', '2511'])
         self.assertTrue(rows[1][-1].endswith('+00:00'))
         self.assertIn(','.join(rows[1]), output.getvalue())
-
-    def test_stale_and_short_write(self):
-        class Port:
-            sent = False
-            def write(self, data):
-                self.sent = True
-                return 1
-            def read(self, size):
-                raise OSError('disconnected')
-        for stale in (False, True):
-            port = Port()
-            commands = queue.Queue()
-            commands.put((b'FIRE\n', bridge.time.monotonic() - (10 if stale else 0)))
-            with patch('sys.stderr', io.StringIO()), self.assertRaises(OSError):
-                bridge.run(port, io.StringIO(), io.StringIO(), commands)
-            self.assertEqual(port.sent, not stale)
 
 
 if __name__ == '__main__':
