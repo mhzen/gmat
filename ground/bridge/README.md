@@ -10,4 +10,3 @@ python -m unittest -v
 Use actual port and a new log filename. Logs telemetry + UTC rx_time.
 The bridge reads telemetry and diagnostics over USB.
 Do not share port with dashboard. Opening serial may reset ESP32.
-Testing only; keep ejection disconnected. Host tests passed; hardware unverified.

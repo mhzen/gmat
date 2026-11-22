@@ -15,7 +15,7 @@ constexpr uint32_t radioBaud = 9600; // Must match the actual E32 configuration,
 constexpr uint8_t imuAddress = 0x68;  // AD0 low.
 constexpr uint32_t telemetryMs = 200;
 // TODO: Confirm against the igniter datasheet on hardware; too short may not fire.
-constexpr uint32_t firePulseMs = 1000; // Single-shot; pin returns LOW even if still ARMED/EJECT.
+constexpr uint32_t firePulseMs = 2000; // Single-shot; pin returns LOW even if still ARMED/EJECT.
 // TODO: Validate AUX/startup/TX timing and watchdog on hardware at the chosen air rate.
 constexpr uint32_t txTimeoutMs = 2000; // Radio watchdog only.
 }
