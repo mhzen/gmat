@@ -42,8 +42,17 @@ GCS USB uses 115200 baud. Python drops the raw flags column, maps the state to
 seq,t_ms,ax,ay,az,gx,gy,gz,state,pressure_pa,temperature_centi_c,rx_time
 ```
 
-Acceleration is mg, gyro is 0.1 degrees/s, pressure is Pa and temperature is
-0.01 degrees C. The USB serial interface carries telemetry and diagnostics. Radio packets
+| Fields | Meaning |
+| --- | --- |
+| `seq`, `t_ms` | Sample sequence number and milliseconds since the payload booted |
+| `ax`, `ay`, `az` | Three-axis acceleration in milligravity (`1000` = `1 g`) |
+| `gx`, `gy`, `gz` | Three-axis angular velocity in tenths of a degree per second (`150` = `15 °/s`) |
+| `state` | Reported payload state (`IDLE` or `FIRE_ACCEPTED`) |
+| `pressure_pa` | Pressure in pascals |
+| `temperature_centi_c` | Temperature in hundredths of a degree Celsius (`2500` = `25 °C`) |
+| `rx_time` | UTC time when the laptop received the sample |
+
+The USB serial interface carries telemetry and diagnostics. Radio packets
 use CRC-protected framing but have no authentication or delivery acknowledgment.
 Update both firmwares and Python together; old telemetry formats are rejected.
 See [packet definitions](firmware/payload/include/packet.h) and
